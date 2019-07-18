@@ -28,10 +28,13 @@ class _Parser:
     Number = ast.Name(id="Number", ctx=ast.Load())
     String = ast.Name(id="String", ctx=ast.Load())
     Object = ast.Name(id="Object", ctx=ast.Load())
+    Array = ast.Name(id="Array", ctx=ast.Load())
     typeof = ast.Name(id="typeof", ctx=ast.Load())
-    strictly_equal = ast.Name(id="strictly_equal", ctx=ast.Load())
     undefined = ast.Name(id="undefined", ctx=ast.Load())
     _Exception = ast.Name(id="_Exception", ctx=ast.Load())
+    strictly_equal = ast.Name(id="strictly_equal", ctx=ast.Load())
+    update_var = ast.Name(id="update_var", ctx=ast.Load())
+    enumerable_properties = ast.Name(id="enumerable_properties", ctx=ast.Load())
 
     def __init__(self):
         self.unique_id = 1
@@ -175,12 +178,13 @@ class _Parser:
     def _FunctionExpression(self, node):
         if node.id:
             assert isinstance(node.id, nodes.Identifier)
-            name = node.id.name
+            name = node.id
         else:
             name = self._make_unique_name()
             node.id = nodes.Identifier(name)
+            self._Identifier(node.id)  # set stmts, expr
         self._FunctionDeclaration(node)  # sets node.stmts
-        node.expr = ast.Name(id=name, ctx=ast.Load())
+        node.expr = node.id.expr
 
     def _ConditionalExpression(self, node):
         node.stmts = node.test.stmts + node.consequent.stmts + node.alternate.stmts
@@ -201,7 +205,7 @@ class _Parser:
             b = 1
         """
         assert isinstance(node.id, nodes.Identifier)
-        node.expr = ast.Name(id=node.id.name, ctx=ast.Load())
+        node.expr = node.id
 
         """
             {init.stmts}
@@ -274,6 +278,30 @@ class _Parser:
             arg=None, value=ast.Dict(keys=[node.key.expr], values=[node.value.expr])
         )
 
+    def _ArrayExpression(self, node):
+        node.stmts = sum((e.stmts for e in node.elements), [])
+        node.expr = ast.Call(func=self.Object, args=[e.expr for e in node.elements], keywords=[])
+
+    def _UpdateExpression(self, node):
+        # assert isinstance(node.argument, nodes.Identifier), node  # ++(++a) not supported
+        node.stmts = node.argument.stmts
+        # TODO: this doesn't work as expected
+        node.expr = ast.Call(
+            func=self.update_var,
+            args=[
+                node.argument.expr,
+                node.operator,
+                ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                ast.Call(func=ast.Name(id="globals", ctx=ast.Load()), args=[], keywords=[]),
+            ],
+            keywords=[],
+        )
+
+    def _ThisExpression(self, node):
+        # TODO: this is obviously wrong
+        node.stmts = []
+        node.expr = ast.Name(id="this", ctx=ast.Load())
+
     # statements
 
     def _ExpressionStatement(self, node):
@@ -288,7 +316,10 @@ class _Parser:
             return {argument};
         """
         node.expr = None
-        node.stmts = node.argument.stmts + [ast.Return(value=node.argument.expr)]
+        if node.argument:
+            node.stmts = node.argument.stmts + ([ast.Return(value=node.argument.expr)])
+        else:
+            node.stmts = [ast.Return(value=None)]
 
     def _BlockStatement(self, node):
         """
@@ -352,6 +383,167 @@ class _Parser:
             ast.Raise(
                 exc=ast.Call(func=self._Exception, args=[node.argument.expr], keywords=[]),
                 cause=None,
+            )
+        ]
+
+    def _ForStatement(self, node):
+        """
+            for ({init}; {test}; {update}) {
+                {body}
+            }
+        """
+        node.expr = None
+        """
+            {init}
+            while True:
+                {test.stmts}
+                if not {test.expr}:
+                    break
+                for _ in ' ':
+                    {body}
+                else:
+                    {update}
+                    continue
+                break
+        """
+        node.stmts = []
+        if node.init:
+            node.stmts += node.init.stmts
+        node.stmts.append(
+            ast.While(
+                test=ast.NameConstant(value=True),
+                body=(
+                    (
+                        node.test.stmts
+                        + [
+                            ast.If(
+                                test=ast.UnaryOp(op=ast.Not(), operand=node.test.expr),
+                                body=[ast.Break()],
+                                orelse=[],
+                            )
+                        ]
+                    )
+                    if node.test
+                    else []
+                )
+                + [
+                    ast.For(
+                        target=ast.Name(id=self._make_unique_name(), ctx=ast.Store()),
+                        iter=ast.Str(s=" "),
+                        body=self._node_stmts(node.body) if node.body else [ast.Pass()],
+                        orelse=(self._node_stmts(node.update) if node.update else [])
+                        + [ast.Continue()],
+                    ),
+                    ast.Break(),
+                ],
+                orelse=[],
+            )
+        )
+
+    def _EmptyStatement(self, node):
+        node.expr = None
+        node.stmts = [ast.Pass()]
+
+    def _TryStatement(self, node):
+        node.expr = None
+        node.stmts = [
+            ast.Try(
+                body=self._node_stmts(node.block),
+                handlers=[node.handler.expr] if node.handler else [],
+                orelse=[],
+                finalbody=self._node_stmts(finalizer) if node.finalizer else [],
+            )
+        ]
+
+    def _CatchClause(self, node):
+        node.stmts = []
+        node.expr = [
+            ast.ExceptHandler(
+                type=None,  # catch all (including SystemExit and KeyboardInterrupt)
+                name=node.param.name,
+                body=self._node_stmts(node.body),
+            )
+        ]
+
+    def _BreakStatement(self, node):
+        node.expr = None
+        node.stmts = [ast.Break()]
+
+    def _ContinueStatement(self, node):
+        node.expr = None
+        node.stmts = [ast.Continue()]
+
+    def _WhileStatement(self, node):
+        node.expr = None
+        node.stmts = node.test.stmts + [
+            ast.While(
+                test=node.test.expr,
+                body=self._node_stmts(node.body) if node.body else [ast.Pass()],
+                orelse=[],
+            )
+        ]
+
+    def _ForInStatement(self, node):
+        node.expr = None
+        node.stmts = (
+            node.left.stmts
+            + node.right.stmts
+            + [
+                ast.For(
+                    target=node.left.declarations[0].id.expr,
+                    iter=ast.Call(
+                        func=self.enumerable_properties, args=[node.right.expr], keywords=[]
+                    ),
+                    body=self._node_stmts(node.body) if node.body else [ast.Pass()],
+                )
+            ]
+        )
+
+    def _ForOfStatement(self, node):
+        node.expr = None
+        node.stmts = (
+            node.left.stmts
+            + node.right.stmts
+            + [
+                ast.For(
+                    target=node.left.declarations[0].id.expr,
+                    iter=node.right.expr,
+                    body=self._node_stmts(node.body) if node.body else [ast.Pass()],
+                )
+            ]
+        )
+
+    def _DoWhileStatement(self, node):
+        """
+            do
+                {body}
+            while {test}
+        """
+        node.expr = None
+        """
+            while True:
+                for _ in ' ':
+                    {body}
+                else:
+                    {test.stmts}
+                    if {test.expr}:
+                        continue
+                break
+        """
+        node.stmts = [
+            ast.While(
+                test=ast.NameConstant(value=True),
+                body=[
+                    ast.For(
+                        target=ast.Name(id=self._make_unique_name(), ctx=ast.Store()),
+                        iter=ast.Str(s=" "),
+                        body=self._node_stmts(node.body) if node.body else [ast.Pass()],
+                        orelse=node.test.stmts
+                        + [ast.If(test=node.test.expr, body=[ast.Continue()], orelse=[])],
+                    ),
+                    ast.Break(),
+                ],
+                orelse=[],
             )
         ]
 
