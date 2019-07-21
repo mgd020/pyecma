@@ -1,16 +1,14 @@
 import ast
-import astunparse
 import esprima
 from esprima import nodes
-
-
-__ALL__ = ["parse_script"]
 
 
 def parse_script(code):
     parser = _Parser()
     js_ast = esprima.parseScript(code, options={"tolerant": True, "loc": True}, delegate=parser)
-    return js_ast.ast
+    node = ast.Module(body=js_ast.stmts)
+    ast.fix_missing_locations(node)
+    return node
 
 
 # def parse_module(code):
@@ -76,7 +74,7 @@ class _Parser:
             return stmts
         stmts += node.stmts
         if node.expr:
-            stmts.append(node.expr)
+            stmts.append(ast.Expr(value=node.expr))
         return stmts
 
     # expressions
@@ -304,12 +302,18 @@ class _Parser:
 
     # statements
 
+    def _Program(self, node):
+        node.expr = None
+        node.stmts = [
+            ast.ImportFrom(module="ecma.lib", names=[ast.alias(name="*", asname=None)], level=0)
+        ] + sum((self._node_stmts(n) for n in node.body), [])
+
     def _ExpressionStatement(self, node):
         """
             {expression};
         """
         node.expr = None
-        node.stmts = node.expression.stmts + [node.expression.expr]
+        node.stmts = node.expression.stmts + [ast.Expr(value=node.expression.expr)]
 
     def _ReturnStatement(self, node):
         """
@@ -550,6 +554,7 @@ class _Parser:
 
 if __name__ == "__main__":
     import sys
+    import astunparse
 
     code = sys.stdin.read()
     py_ast = parse_script(code)

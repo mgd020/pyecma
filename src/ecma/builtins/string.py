@@ -1,0 +1,2 @@
+class String(str):
+    pass

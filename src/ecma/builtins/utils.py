@@ -1,29 +1,5 @@
-class Number:
-    pass
-
-
-class String:
-    pass
-
-
-class Object:
-    pass
-
-
-class Array:
-    pass
-
-
 def typeof(value):
     return type(value).__name__
-
-
-class undefined:
-    pass
-
-
-class null:
-    pass
 
 
 class _Exception(Exception):
